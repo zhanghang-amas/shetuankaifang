@@ -1,109 +1,126 @@
-# DeepSeek 网页助手 · 社团开荒
+# 社团 DeepSeek 助手
 
-一个**零第三方依赖**的 DeepSeek 网页对话界面：流式输出、深度思考（Reasoner）、多套主题、多轮会话，全部只用原生 HTML/CSS/JS 写成。
+给社团成员用的 DeepSeek 网页聊天界面：**登录后才能用**，额度由社团统一提供，每个人 500 万 tokens，用超了自动拦截。
 
-线上地址：**https://zhanghang-amas.github.io/shetuankaifang/**
+- 线上地址：<https://zhanghang-amas.github.io/shetuankaifang/>
+- 后端：`server/`（Node，零依赖），部署到 Render 等平台；账号和 Key 都在后端
 
-> 第一次打开会弹出「设置」，把你自己的 DeepSeek API Key 粘进去就能聊。Key 只保存在**你自己浏览器的 localStorage** 里，不会上传到任何地方，也不会进这个仓库。
-
----
-
-## 这个仓库有什么
-
-```
-shetuankaifang/
-├── index.html            页面骨架
-├── style.css             主题变量与全部样式
-├── app.js                前端逻辑（会话、流式渲染、轻量 Markdown）
-├── static-adapter.js     双模式适配器：判断当前是「静态托管」还是「Node 服务」
-├── favicon.svg           小鲸鱼图标
-├── .nojekyll             让 GitHub Pages 不做 Jekyll 处理
-├── README.md             本文件
-└── server/               可选：想共享一个 Key + 访问密码时用
-    ├── server.mjs        零依赖 Node 服务（SSE 转发、访问密码、健康检查）
-    ├── package.json
-    ├── Dockerfile
-    └── DEPLOY.md         部署到 Render / Railway / VPS 的步骤
-```
-
-同一个前端有两种运行模式，`static-adapter.js` 会自动判断：
-
-| 环境 | 判断依据 | Key 存在哪 | 请求路径 |
-| --- | --- | --- | --- |
-| GitHub Pages（静态托管） | `GET api/health` 拿不到 JSON | 访客自己的浏览器 | 浏览器 → `api.deepseek.com` 直连 |
-| Node 服务（`server/server.mjs`） | `GET api/health` 返回 `{"ok":true}` | 服务器 `server/data/config.json` | 浏览器 → 本机服务 → DeepSeek |
+> 第一次打开会要求登录。账号找社团管理员要，API Key 不需要自己准备。
 
 ---
 
-## 一、直接在线用（GitHub Pages）
+## 架构
+
+```
+浏览器（GitHub Pages 上的静态页面）
+   │  1. POST /api/login  → 拿到 Bearer token
+   │  2. POST /api/chat   → 带 token 请求（浏览器里没有 Key）
+   ▼
+社团后端（server/server.mjs，部署在 Render）
+   ├─ 校验 token、检查剩余额度
+   ├─ 用服务器上的 DeepSeek Key 调用 api.deepseek.com
+   └─ 按上游返回的 usage 扣掉该账号的 token 额度
+```
+
+关键点：
+
+- **Key 不出服务器**：浏览器里没有 Key，F12 也翻不到。
+- **额度在服务端算**：按 DeepSeek 返回的 `usage`（prompt + completion）逐次累加，改前端也没用。
+- **登录用 Bearer token**：不用 Cookie，所以 Pages（`github.io`）和后端（`onrender.com`）跨域也能正常登录。
+
+| 文件 | 作用 |
+| --- | --- |
+| `index.html` `style.css` `app.js` | 聊天界面 |
+| `auth.css` | 登录门 / 账号面板样式 |
+| `runtime.js` | 运行环境适配：判断「服务端模式」还是「纯静态模式」，处理登录、token、额度刷新 |
+| `config.js` | **后端地址**写在这里（`window.DS_API_BASE`） |
+| `server/server.mjs` | 后端：登录、额度、SSE 转发、跨域、管理员接口 |
+| `server/DEPLOY.md` | 部署到 Render / VPS / Docker 的完整步骤 |
+
+---
+
+## 使用
 
 1. 打开 <https://zhanghang-amas.github.io/shetuankaifang/>
-2. 右上角「设置」→ 粘贴 API Key →「保存」
-3. 没有 Key 的话去 <https://platform.deepseek.com/api_keys> 创建一个（账户需要有余额）
+2. 输入社团给的账号密码
+3. 右上角显示「剩余 xxx」，鼠标悬停可看「已用 / 上限」
+4. 点右上角齿轮 →「账号」，可以看已用多少、还剩多少、退出登录
 
-每个人用的都是自己的 Key，互不影响：你的对话记录、Key、主题设置都只存在你自己的浏览器里，换设备就重新填一次。
+额度用完后再发消息会提示「额度已经用完了」，需要管理员重置。
+
+对话记录只存在你自己的浏览器（localStorage），换设备看不到，也不会同步到服务器。
 
 ---
 
-## 二、在本机跑（Node，可选）
+## 管理账号和额度
 
-需要 Node.js 20 或以上。
+账号写在环境变量 `ACCOUNTS` 里，格式 `用户名:密码:额度`，多个账号用逗号分隔：
 
-```bash
-node server/server.mjs --open
+```
+ACCOUNTS=测试:123456:5000000,张三:zhangsan-pass:5000000,李四:lisi-pass:3000000
 ```
 
-默认打开 <http://127.0.0.1:3000>。这时 Key 保存在 `server/data/config.json`，浏览器里不用填。
+不写额度就用 `DEFAULT_QUOTA`（默认 500 万）。
 
-可用的环境变量：
+管理员接口（需要 `ADMIN_PASSWORD`，用 `X-Admin-Password` 请求头传）：
 
-| 变量 | 作用 |
-| --- | --- |
-| `PORT` | 起始端口（默认 3000，被占用会自动往后找 3000–3019） |
-| `HOST` | 监听地址，局域网给手机用时设 `0.0.0.0` |
-| `ACCESS_PASSWORD` | 访问密码，设置后页面和接口都要先登录 |
-| `DEEPSEEK_API_KEY` | 初始 Key（也可以进页面再填） |
-| `COOKIE_SECURE` | HTTPS 下设 `1`，登录 Cookie 只走加密连接 |
+```powershell
+# 看所有人的用量
+Invoke-RestMethod https://你的服务.onrender.com/api/admin/users `
+  -Headers @{ 'X-Admin-Password' = '管理员口令' }
 
----
+# 把「测试」的已用额度清零
+Invoke-RestMethod https://你的服务.onrender.com/api/admin/reset -Method Post `
+  -Headers @{ 'X-Admin-Password' = '管理员口令'; 'Content-Type' = 'application/json' } `
+  -Body '{"username":"测试"}'
 
-## 三、公网共享一个 Key（可选）
+# 改某个人的上限（1000 万）
+Invoke-RestMethod https://你的服务.onrender.com/api/admin/quota -Method Post `
+  -Headers @{ 'X-Admin-Password' = '管理员口令'; 'Content-Type' = 'application/json' } `
+  -Body '{"username":"测试","quota":10000000}'
+```
 
-如果想让社团成员共用一个 Key、又不想让 Key 出现在任何人的浏览器里，就用 Node 版部署：仓库里的 `server/` 目录可以直接扔到 Render / Railway / Zeabur / VPS / Docker 上，配有访问密码和 `/api/health` 健康检查。
-
-完整步骤见 [server/DEPLOY.md](server/DEPLOY.md)。
-
----
-
-## 常见问题
-
-**提示「API Key 无效或已过期」**
-Key 复制不完整，或者账户没余额。到 <https://platform.deepseek.com/api_keys> 重新生成一个。
-
-**提示「无法连接 DeepSeek」**
-网络或代理问题。也可以到「设置」里把「API 地址」改成中转站地址（不要带 `/v1`，程序会自己拼 `/chat/completions`）。
-
-**回答不是逐字出现的**
-这版是浏览器直连，正常情况下是流式的；如果浏览器插件（广告拦截、脚本管理）拦截了流式响应，关掉插件再试。
-
-**对话记录在哪**
-在浏览器 localStorage 里。换浏览器、清缓存会丢，重要对话自己另存。
-
-**改了样式不生效**
-`index.html` 里 CSS/JS 带了 `?v=13` 版本号，改完记得同步加数字，或者 Ctrl+F5 强制刷新。
-
-**想换默认模型**
-「设置」里能填系统提示词；模型在下拉框里选 Chat / Reasoner，选择会记在本地。配置了 Key 后下拉框会自动拉取上游真实模型列表。
+⚠️ 免费平台重启会丢磁盘，用量可能回到 0。要严格统计就配 `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`，详见 [server/DEPLOY.md](server/DEPLOY.md)。
 
 ---
 
-## 隐私与安全
+## 部署后端
 
-- 静态模式下 Key 只存在你自己的浏览器，页面不会把它发给除 DeepSeek 官方接口（或你手填的中转地址）以外的任何服务器。
-- `server/data/` 里是明文 Key，已被 `.gitignore` 排除，**不要提交**。
-- 公开部署 Node 版时务必设置 `ACCESS_PASSWORD`，否则任何人都能消耗你的余额。
-- 浏览器 localStorage 里的 Key 用 `F12 → Application` 可见，公用电脑上用完记得点「清除 Key」。
+见 [server/DEPLOY.md](server/DEPLOY.md)（Render 免费实例，约 5 分钟）。
 
-## 许可
+部署完成后，把服务地址填进 `config.js`：
 
-MIT
+```js
+window.DS_API_BASE = 'https://你的服务.onrender.com';
+```
+
+提交后 Pages 会自动重新发布，之后打开线上地址就是「先登录、再用」。
+
+---
+
+## 备用模式：每个人用自己的 Key
+
+如果 `DS_API_BASE` 留空，页面会退回纯静态模式：浏览器直连 `api.deepseek.com`，每个访客在「设置」里填自己的 Key，存在本地浏览器。
+
+适合你不想管后端、也不介意每个人自备 Key 的情况。要恢复这种模式，把 `config.js` 里的地址清空即可。
+
+---
+
+## 本地跑
+
+```bash
+# 后端（需要 Node 20+）
+ACCOUNTS="测试:123456:5000000" ADMIN_PASSWORD="管理口令" \
+DEEPSEEK_API_KEY="sk-..." node server/server.mjs
+# 打开 http://127.0.0.1:3000
+```
+
+Windows PowerShell 用 `$env:ACCOUNTS='...'` 的写法。
+
+---
+
+## 安全提醒
+
+- 示例密码比较弱，正式用之前建议换成强密码（改 `ACCOUNTS` 环境变量即可）。
+- `server/data/` 里有 Key 和账号哈希，已被 `.gitignore` 排除，**不要提交**。
+- 管理员口令一旦泄露，别人就能重置额度、改上限，注意保管。

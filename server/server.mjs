@@ -1,18 +1,20 @@
 /**
- * 本地 DeepSeek 网页助手 —— 零依赖 Node 服务
+ * 社团版 DeepSeek 网页助手 —— 零依赖 Node 服务
  *
- * 职责：
- *   1. 托管 public/ 下的静态页面
- *   2. 把浏览器里的对话以 SSE 流式转发给 DeepSeek
- *   3. 把 API Key 保存在本机 data/config.json，不暴露给前端
+ * 在原来「本地转发」的基础上加了一层真正的后端：
+ *   1. 账号登录（用户名 + 密码，scrypt 加盐哈希）
+ *   2. 每个账号独立的 token 额度（默认 500 万），按上游 usage 精确记账
+ *   3. DeepSeek API Key 只存在服务器，浏览器永远拿不到
+ *   4. 允许 GitHub Pages 跨域调用（用 Bearer token，不依赖第三方 Cookie）
  *
- * 启动：node server.mjs [--open]
+ * 启动：node server.mjs
+ * 环境变量见 server/DEPLOY.md
  */
 
 import http from 'node:http';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { readFile, writeFile, mkdir, unlink, appendFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, unlink, appendFile, rename } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 
@@ -20,10 +22,22 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 静态文件放在仓库根目录，Node 服务与 GitHub Pages 共用同一套前端
 const PUBLIC_DIR = process.env.PUBLIC_DIR || path.join(__dirname, '..');
 // 只允许托管这几个文件，避免把 server.mjs / .git / data 暴露出去
-const PUBLIC_FILES = new Set(['index.html', 'app.js', 'style.css', 'favicon.svg', 'static-adapter.js']);
+const PUBLIC_FILES = new Set([
+  'index.html',
+  'app.js',
+  'style.css',
+  'favicon.svg',
+  'runtime.js',
+  'config.js',
+  'auth.css',
+]);
+
 const DATA_DIR = path.join(__dirname, 'data');
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
+const USERS_PATH = path.join(DATA_DIR, 'users.json');
 const ACCESS_LOG = path.join(DATA_DIR, 'access.log');
+const PID_PATH = path.join(DATA_DIR, 'server.pid');
+
 const FALLBACK_MODELS = [
   { id: 'deepseek-chat', name: 'DeepSeek Chat' },
   { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner' },
@@ -32,13 +46,31 @@ const FALLBACK_MODELS = [
 const HOST = process.env.HOST || '127.0.0.1';
 const BASE_PORT = Number(process.env.PORT) || 3000;
 
-// 部署到公网时务必设置 ACCESS_PASSWORD；不设置则保持本机免密访问
-const ACCESS_PASSWORD = process.env.ACCESS_PASSWORD || '';
-const AUTH_COOKIE = 'ds_auth';
-const AUTH_TOKEN = ACCESS_PASSWORD
-  ? crypto.createHash('sha256').update(`deepseek-local::${ACCESS_PASSWORD}`).digest('hex')
-  : '';
-const COOKIE_SECURE = process.env.COOKIE_SECURE === '1' ? '; Secure' : '';
+/* ---------------------------- 账号与额度 ---------------------------- */
+
+// 默认给每个账号 500 万 tokens
+const DEFAULT_QUOTA = Number(process.env.DEFAULT_QUOTA) || 5_000_000;
+// 账号列表：环境变量优先，"用户名:密码:额度,用户名:密码" 的形式
+const ACCOUNTS_ENV = process.env.ACCOUNTS || '';
+const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const SESSION_TTL = 30 * 24 * 3600 * 1000; // 登录状态保留 30 天
+// 管理员口令：设置后才能用 /api/admin/* 查用量、重置额度、改上限
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
+
+// 免费实例重启会丢磁盘，可选接一个 Upstash Redis 让用量不丢
+const UPSTASH_URL = String(process.env.UPSTASH_REDIS_REST_URL || '').replace(/\/+$/, '');
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
+const REMOTE_STATE_KEY = process.env.STATE_KEY || 'shetuankaifang:users';
+
+/* ---------------------------- 跨域 ---------------------------- */
+
+const ALLOWED_ORIGINS = String(
+  process.env.ALLOWED_ORIGINS ||
+    'https://zhanghang-amas.github.io,http://127.0.0.1:3000,http://localhost:3000,http://127.0.0.1:8123',
+)
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 const DEFAULT_CONFIG = {
   apiKey: process.env.DEEPSEEK_API_KEY || '',
@@ -60,41 +92,10 @@ const MIME = {
 };
 
 /* ------------------------------------------------------------------ */
-/* 配置读写                                                             */
+/* 基础工具                                                             */
 /* ------------------------------------------------------------------ */
 
-async function readConfig() {
-  try {
-    const raw = await readFile(CONFIG_PATH, 'utf8');
-    return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
-  } catch {
-    return { ...DEFAULT_CONFIG };
-  }
-}
-
-async function writeConfig(patch) {
-  const current = await readConfig();
-  const next = { ...current, ...patch };
-  await mkdir(DATA_DIR, { recursive: true });
-  await writeFile(CONFIG_PATH, JSON.stringify(next, null, 2), 'utf8');
-  return next;
-}
-
-/** 返回给前端的安全视图：不含明文 key */
-function publicConfig(cfg) {
-  return {
-    hasKey: Boolean(cfg.apiKey),
-    keyHint: cfg.apiKey ? `${cfg.apiKey.slice(0, 4)}••••${cfg.apiKey.slice(-4)}` : '',
-    baseUrl: cfg.baseUrl,
-    model: cfg.model,
-    systemPrompt: cfg.systemPrompt,
-    temperature: cfg.temperature,
-  };
-}
-
-/* ------------------------------------------------------------------ */
-/* 工具函数                                                             */
-/* ------------------------------------------------------------------ */
+const fmt = (n) => Number(n || 0).toLocaleString('zh-CN');
 
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -152,105 +153,347 @@ async function serveStatic(req, res, pathname) {
 }
 
 /* ------------------------------------------------------------------ */
-/* 访问密码（部署到公网时使用）                                          */
+/* 配置读写                                                             */
 /* ------------------------------------------------------------------ */
 
-function readCookie(req, name) {
-  const raw = req.headers.cookie || '';
-  for (const part of raw.split(';')) {
-    const idx = part.indexOf('=');
-    if (idx < 0) continue;
-    if (part.slice(0, idx).trim() === name) return part.slice(idx + 1).trim();
+async function readConfig() {
+  try {
+    const raw = await readFile(CONFIG_PATH, 'utf8');
+    return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
+  } catch {
+    return { ...DEFAULT_CONFIG };
   }
-  return '';
 }
+
+/** 返回给前端的安全视图：不含明文 key */
+function publicConfig(cfg) {
+  return {
+    hasKey: Boolean(cfg.apiKey),
+    baseUrl: cfg.baseUrl,
+    model: cfg.model,
+    systemPrompt: cfg.systemPrompt,
+    temperature: cfg.temperature,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* 账号存储（内存 + 本地文件 + 可选 Upstash）                             */
+/* ------------------------------------------------------------------ */
+
+let usersCache = null;
+
+async function remoteGetState() {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
+  try {
+    const res = await fetch(`${UPSTASH_URL}/get/${REMOTE_STATE_KEY}`, {
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data && data.result ? JSON.parse(data.result) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function remoteSetState(store) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return;
+  try {
+    await fetch(`${UPSTASH_URL}/set/${REMOTE_STATE_KEY}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(store),
+    });
+  } catch {
+    /* 远端写失败不影响本次对话 */
+  }
+}
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  const hash = crypto.scryptSync(String(password), salt, 32).toString('hex');
+  return { salt, hash };
+}
+
+function verifyPassword(account, password) {
+  try {
+    const candidate = crypto.scryptSync(String(password), account.salt, 32);
+    const expected = Buffer.from(account.hash, 'hex');
+    return candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected);
+  } catch {
+    return false;
+  }
+}
+
+function createUser(name, password, quota) {
+  const { salt, hash } = hashPassword(password);
+  return {
+    name,
+    salt,
+    hash,
+    quota: Number(quota) > 0 ? Number(quota) : DEFAULT_QUOTA,
+    used: 0,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+/** 解析 ACCOUNTS 环境变量： "测试:123456:5000000,张三:密码" */
+function parseAccountsEnv() {
+  const out = [];
+  for (const raw of String(ACCOUNTS_ENV).split(',')) {
+    const item = raw.trim();
+    if (!item) continue;
+    const parts = item.split(':');
+    const name = (parts[0] || '').trim();
+    const password = (parts[1] || '').trim();
+    const quota = parts[2] ? Number(parts[2]) : DEFAULT_QUOTA;
+    if (name && password) out.push({ name, password, quota });
+  }
+  return out;
+}
+
+async function saveUsers(store) {
+  usersCache = store;
+  await mkdir(DATA_DIR, { recursive: true });
+  const tmp = `${USERS_PATH}.tmp`;
+  try {
+    await writeFile(tmp, JSON.stringify(store, null, 2), 'utf8');
+    await rename(tmp, USERS_PATH);
+  } catch {
+    /* 无写权限时退回内存模式，不影响本次运行 */
+  }
+  await remoteSetState(store);
+}
+
+async function loadUsers() {
+  if (usersCache) return usersCache;
+
+  let store = null;
+  const remote = await remoteGetState();
+  if (remote && remote.users) store = remote;
+
+  if (!store) {
+    try {
+      const raw = await readFile(USERS_PATH, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.users) store = parsed;
+    } catch {
+      /* 首次启动 */
+    }
+  }
+
+  if (!store) store = { version: 1, users: {} };
+  usersCache = store;
+
+  // 环境变量里的账号：不存在就创建（已存在则不动，避免覆盖线上用量）
+  const seeded = parseAccountsEnv();
+  const accounts = seeded.length ? seeded : [{ name: '测试', password: '123456', quota: DEFAULT_QUOTA }];
+  let changed = false;
+  for (const account of accounts) {
+    if (!store.users[account.name]) {
+      store.users[account.name] = createUser(account.name, account.password, account.quota);
+      changed = true;
+    }
+  }
+  if (changed) await saveUsers(store);
+  return store;
+}
+
+function userView(account) {
+  const used = Math.max(0, Math.round(account.used || 0));
+  const quota = Math.round(account.quota || 0);
+  return {
+    name: account.name,
+    quota,
+    used,
+    remaining: Math.max(0, quota - used),
+    percent: quota > 0 ? Math.min(100, Math.round((used / quota) * 100)) : 100,
+  };
+}
+
+async function addUsage(name, tokens) {
+  if (!tokens) return;
+  const store = await loadUsers();
+  const account = store.users[name];
+  if (!account) return;
+  account.used = Math.max(0, Number(account.used || 0) + tokens);
+  account.updatedAt = new Date().toISOString();
+  await saveUsers(store);
+}
+
+/* ------------------------------------------------------------------ */
+/* 会话令牌（HMAC 签名；SESSION_SECRET 固定时重启不掉登录）                */
+/* ------------------------------------------------------------------ */
 
 function sameSecret(a, b) {
-  const ba = Buffer.from(String(a));
-  const bb = Buffer.from(String(b));
-  return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
+  const ba = Buffer.from(String(a || ''));
+  const bb = Buffer.from(String(b || ''));
+  return ba.length === bb.length && ba.length > 0 && crypto.timingSafeEqual(ba, bb);
 }
 
-function isAuthed(req) {
-  if (!ACCESS_PASSWORD) return true;
-  return sameSecret(readCookie(req, AUTH_COOKIE), AUTH_TOKEN);
+function signToken(payload) {
+  const body = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const mac = crypto.createHmac('sha256', SESSION_SECRET).update(body).digest('base64url');
+  return `${body}.${mac}`;
 }
 
-function loginPage() {
-  return `<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>访问验证 · DeepSeek 本地助手</title>
-<style>
-  * { box-sizing: border-box; }
-  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f7f7f8; color: #17171a; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
-  .card { width: min(360px, calc(100vw - 40px)); padding: 28px; border: 1px solid #e7e7eb; border-radius: 18px; background: #fff; box-shadow: 0 18px 50px rgba(15, 18, 25, 0.08); }
-  .logo { width: 44px; height: 44px; margin-bottom: 18px; border-radius: 12px; background: #4d6bfe; display: grid; place-items: center; }
-  h1 { margin: 0 0 6px; font-size: 18px; }
-  p { margin: 0 0 18px; color: #55575e; font-size: 13px; }
-  input { width: 100%; padding: 11px 13px; border: 1px solid #d8d8de; border-radius: 10px; font-size: 15px; outline: none; }
-  input:focus { border-color: #4d6bfe; box-shadow: 0 0 0 3px rgba(77, 107, 254, 0.12); }
-  button { width: 100%; margin-top: 12px; padding: 11px; border: 0; border-radius: 10px; background: #4d6bfe; color: #fff; font-size: 15px; font-weight: 600; cursor: pointer; }
-  button:disabled { opacity: 0.6; }
-  .err { min-height: 18px; margin-top: 10px; color: #d6455d; font-size: 13px; }
-</style>
-</head>
-<body>
-  <form class="card" id="f">
-    <div class="logo">
-      <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true">
-        <ellipse cx="14" cy="18.5" rx="10.5" ry="7.5" fill="#fff" />
-        <path d="M23.5 18.5 30 12.8v11.4Z" fill="#fff" />
-        <path d="M13 10.6c0-2.2 1.2-4 3.2-4.8M17 10.2c0-1.5.7-2.8 1.9-3.7" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round" />
-        <circle cx="9.8" cy="16.7" r="1.15" fill="#4d6bfe" />
-      </svg>
-    </div>
-    <h1>访问验证</h1>
-    <p>这个站点已开启访问密码，请输入后继续。</p>
-    <input id="pw" type="password" placeholder="访问密码" autocomplete="current-password" autofocus />
-    <button id="go" type="submit">进入</button>
-    <div class="err" id="err"></div>
-  </form>
-  <script>
-    const form = document.getElementById('f');
-    const pw = document.getElementById('pw');
-    const go = document.getElementById('go');
-    const err = document.getElementById('err');
-    form.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      go.disabled = true;
-      err.textContent = '';
-      try {
-        const res = await fetch('/api/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ password: pw.value }),
-        });
-        if (res.ok) {
-          let next = new URLSearchParams(location.search).get('next') || '/';
-          if (!next.startsWith('/') || next.startsWith('//')) next = '/';
-          location.replace(next);
-          return;
-        }
-        const data = await res.json().catch(() => ({}));
-        err.textContent = data.error || '密码不正确';
-      } catch {
-        err.textContent = '网络错误，请重试';
-      }
-      go.disabled = false;
-    });
-  </script>
-</body>
-</html>`;
+function verifyToken(token) {
+  const [body, mac] = String(token || '').split('.');
+  if (!body || !mac) return null;
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(body).digest('base64url');
+  const a = Buffer.from(mac);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    if (!payload || !payload.u || Number(payload.exp) < Date.now()) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+async function requireUser(req, res) {
+  const header = String(req.headers.authorization || '');
+  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+  const payload = verifyToken(token);
+  if (!payload) {
+    sendJson(res, 401, { error: '登录状态已失效，请重新登录', code: 'UNAUTHORIZED' });
+    return null;
+  }
+  const store = await loadUsers();
+  const account = store.users[payload.u];
+  if (!account) {
+    sendJson(res, 401, { error: '账号不存在，请重新登录', code: 'UNAUTHORIZED' });
+    return null;
+  }
+  return { name: payload.u, account };
+}
+
+/* 登录失败限流：同一 IP 10 分钟内最多 10 次 */
+const loginFails = new Map();
+
+function loginBlocked(ip) {
+  const record = loginFails.get(ip);
+  if (!record) return false;
+  if (Date.now() > record.resetAt) {
+    loginFails.delete(ip);
+    return false;
+  }
+  return record.count >= 10;
+}
+
+function noteLoginFail(ip) {
+  const record = loginFails.get(ip) || { count: 0, resetAt: Date.now() + 10 * 60 * 1000 };
+  record.count += 1;
+  loginFails.set(ip, record);
 }
 
 /* ------------------------------------------------------------------ */
-/* 对话：把上游 SSE 原样转发给浏览器，并处理错误与中断                     */
+/* 登录 / 账号信息                                                       */
 /* ------------------------------------------------------------------ */
 
-async function handleChat(req, res) {
+async function handleLogin(req, res) {
+  const ip = req.socket.remoteAddress || 'unknown';
+  if (loginBlocked(ip)) {
+    sendJson(res, 429, { error: '密码错误次数过多，请 10 分钟后再试' });
+    return;
+  }
+
+  let input;
+  try {
+    input = JSON.parse(await readBody(req, 64 * 1024));
+  } catch {
+    sendJson(res, 400, { error: '请求格式错误' });
+    return;
+  }
+
+  const name = String(input.username || '').trim();
+  const password = String(input.password || '');
+  if (!name || !password) {
+    sendJson(res, 400, { error: '请输入用户名和密码' });
+    return;
+  }
+
+  const store = await loadUsers();
+  const account = store.users[name];
+  if (!account || !verifyPassword(account, password)) {
+    noteLoginFail(ip);
+    sendJson(res, 401, { error: '用户名或密码不正确' });
+    return;
+  }
+
+  loginFails.delete(ip);
+  const token = signToken({ u: name, exp: Date.now() + SESSION_TTL });
+  sendJson(res, 200, { ok: true, token, user: userView(account) });
+}
+
+/* ------------------------------------------------------------------ */
+/* 模型列表 / 连接测试                                                    */
+/* ------------------------------------------------------------------ */
+
+async function fetchModels(cfg) {
+  const upstream = await fetch(`${normalizeBaseUrl(cfg.baseUrl)}/models`, {
+    headers: { Authorization: `Bearer ${cfg.apiKey}` },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!upstream.ok) {
+    return { ok: false, status: upstream.status, models: FALLBACK_MODELS };
+  }
+  const data = await upstream.json();
+  const models = (Array.isArray(data.data) ? data.data : [])
+    .filter((m) => m && typeof m.id === 'string')
+    .map((m) => ({ id: m.id, name: m.name || m.id }));
+  return { ok: true, status: upstream.status, models: models.length ? models : FALLBACK_MODELS };
+}
+
+async function handleModels(res) {
+  const cfg = await readConfig();
+  if (!cfg.apiKey) {
+    sendJson(res, 200, { models: FALLBACK_MODELS, source: 'fallback', message: '服务器还没有配置 Key' });
+    return;
+  }
+  try {
+    const result = await fetchModels(cfg);
+    if (result.ok) {
+      sendJson(res, 200, { models: result.models, source: 'upstream' });
+    } else {
+      sendJson(res, 200, { models: FALLBACK_MODELS, source: 'fallback', message: `上游 HTTP ${result.status}` });
+    }
+  } catch (err) {
+    sendJson(res, 200, { models: FALLBACK_MODELS, source: 'fallback', message: err.message });
+  }
+}
+
+async function handleTest(res) {
+  const cfg = await readConfig();
+  if (!cfg.apiKey) {
+    sendJson(res, 200, { ok: false, message: '服务器还没有配置 Key' });
+    return;
+  }
+  const started = Date.now();
+  try {
+    const result = await fetchModels(cfg);
+    if (result.ok) {
+      sendJson(res, 200, {
+        ok: true,
+        message: `连接正常：HTTP ${result.status}，${result.models.length} 个模型，${Date.now() - started}ms`,
+      });
+    } else {
+      sendJson(res, 200, { ok: false, message: `上游返回 HTTP ${result.status}` });
+    }
+  } catch (err) {
+    sendJson(res, 200, { ok: false, message: `连接失败：${err.message}` });
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 对话：转发 SSE，并按 usage 记账                                        */
+/* ------------------------------------------------------------------ */
+
+const estimateTokens = (chars) => Math.ceil(Number(chars || 0) / 1.6);
+
+async function handleChat(req, res, ctx) {
   let payload;
   try {
     payload = JSON.parse(await readBody(req));
@@ -261,7 +504,16 @@ async function handleChat(req, res) {
 
   const cfg = await readConfig();
   if (!cfg.apiKey) {
-    sendJson(res, 400, { error: '还没有配置 API Key。点击右上角「设置」填入 DeepSeek 的 API Key。' });
+    sendJson(res, 400, { error: '服务器还没有配置 DeepSeek API Key，请联系管理员。' });
+    return;
+  }
+
+  if (ctx.account.quota - ctx.account.used <= 0) {
+    sendJson(res, 403, {
+      error: `账号「${ctx.name}」的额度已经用完了（上限 ${fmt(ctx.account.quota)} tokens），请联系管理员。`,
+      code: 'QUOTA_EXCEEDED',
+      user: userView(ctx.account),
+    });
     return;
   }
 
@@ -276,10 +528,11 @@ async function handleChat(req, res) {
     return;
   }
 
-  const systemPrompt = typeof cfg.systemPrompt === 'string' ? cfg.systemPrompt.trim() : '';
+  // 允许用户带自己的系统提示词，没带就用服务器默认的
+  const customPrompt = typeof payload.systemPrompt === 'string' ? payload.systemPrompt.trim().slice(0, 8000) : '';
+  const systemPrompt = customPrompt || (typeof cfg.systemPrompt === 'string' ? cfg.systemPrompt.trim() : '');
   if (systemPrompt) messages.unshift({ role: 'system', content: systemPrompt });
 
-  // 模型名透传：上游有哪些模型由 /api/models 动态获取，这里不再写死白名单
   const requested = typeof payload.model === 'string' ? payload.model.trim() : '';
   const model = requested || cfg.model;
 
@@ -289,10 +542,7 @@ async function handleChat(req, res) {
     stream: true,
     stream_options: { include_usage: true },
   };
-
-  if (!/reason/i.test(model)) {
-    body.temperature = cfg.temperature;
-  }
+  if (!/reason/i.test(model)) body.temperature = cfg.temperature;
 
   const controller = new AbortController();
   res.on('close', () => {
@@ -334,8 +584,8 @@ async function handleChat(req, res) {
     } catch {
       if (raw) message = raw.slice(0, 300);
     }
-    if (upstream.status === 401) message = 'API Key 无效或已过期，请到「设置」里检查。';
-    if (upstream.status === 402) message = 'DeepSeek 账户余额不足，请先充值。';
+    if (upstream.status === 401) message = 'API Key 无效或已过期，请联系管理员。';
+    if (upstream.status === 402) message = 'DeepSeek 账户余额不足，请联系管理员充值。';
     if (upstream.status === 429) message = '请求太频繁或额度耗尽，请稍后再试。';
     sendJson(res, 502, { error: message });
     return;
@@ -349,19 +599,52 @@ async function handleChat(req, res) {
   });
   res.flushHeaders?.();
 
+  const promptChars = messages.reduce((sum, m) => sum + m.content.length, 0);
+  let usage = null;
+  let outChars = 0;
+  let buffer = '';
+  const decoder = new TextDecoder();
+
   try {
     for await (const chunk of upstream.body) {
       if (res.writableEnded) break;
       res.write(chunk);
+
+      buffer += decoder.decode(chunk, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, idx).replace(/\r$/, '');
+        buffer = buffer.slice(idx + 1);
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === '[DONE]') continue;
+        try {
+          const json = JSON.parse(data);
+          if (json.usage) usage = json.usage;
+          const delta = json.choices && json.choices[0] && json.choices[0].delta;
+          if (delta && typeof delta.content === 'string') outChars += delta.content.length;
+          if (delta && typeof delta.reasoning_content === 'string') outChars += delta.reasoning_content.length;
+        } catch {
+          /* 半行 / 非 JSON 忽略 */
+        }
+      }
     }
   } catch (err) {
     if (err.name !== 'AbortError') {
-      // 头已发出，只能在流里塞一个错误事件
       const detail = JSON.stringify({ error: { message: `连接中断：${err.message}` } });
       if (!res.writableEnded) res.write(`data: ${detail}\n\n`);
     }
   } finally {
     if (!res.writableEnded) res.end();
+
+    // 记账：优先用上游 usage，拿不到就按字符数估算
+    let spent = 0;
+    if (usage && (usage.prompt_tokens || usage.completion_tokens)) {
+      spent = Number(usage.prompt_tokens || 0) + Number(usage.completion_tokens || 0);
+    } else {
+      spent = estimateTokens(promptChars) + estimateTokens(outChars);
+    }
+    await addUsage(ctx.name, spent).catch(() => {});
   }
 }
 
@@ -369,12 +652,31 @@ async function handleChat(req, res) {
 /* 路由                                                                 */
 /* ------------------------------------------------------------------ */
 
+function applyCors(req, res) {
+  const origin = req.headers.origin;
+  if (!origin) return;
+  const allowed = ALLOWED_ORIGINS.includes('*') || ALLOWED_ORIGINS.includes(origin);
+  if (!allowed) return;
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'authorization, content-type');
+  res.setHeader('Access-Control-Max-Age', '600');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const { pathname } = url;
 
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'same-origin');
+  applyCors(req, res);
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204).end();
+    return;
+  }
 
   res.on('finish', () => {
     const line = `${new Date().toISOString()}\t${res.statusCode}\t${req.method}\t${pathname}\t${String(req.headers['user-agent'] || '').slice(0, 60)}\n`;
@@ -382,178 +684,136 @@ const server = http.createServer(async (req, res) => {
   });
 
   try {
+    // 健康检查：公开，不需要登录（前端用它判断是静态托管还是服务端模式）
     if (pathname === '/api/health') {
-      sendJson(res, 200, { ok: true });
+      sendJson(res, 200, { ok: true, mode: 'server', service: 'shetuankaifang' });
       return;
     }
 
-    // 设置了 ACCESS_PASSWORD 时，页面与接口都需要先通过密码验证
-    if (ACCESS_PASSWORD) {
-      if (pathname === '/login' && (req.method === 'GET' || req.method === 'HEAD')) {
-        res.writeHead(200, {
-          'Content-Type': 'text/html; charset=utf-8',
-          'Cache-Control': 'no-store',
-        });
-        res.end(loginPage());
+    // 管理员接口：查看用量 / 重置额度 / 调整上限
+    if (pathname.startsWith('/api/admin/')) {
+      if (!ADMIN_PASSWORD) {
+        sendJson(res, 404, { error: 'Not Found' });
+        return;
+      }
+      if (!sameSecret(req.headers['x-admin-password'], ADMIN_PASSWORD)) {
+        sendJson(res, 401, { error: '管理员口令不正确' });
         return;
       }
 
-      if (pathname === '/api/login') {
-        if (req.method !== 'POST') {
-          sendJson(res, 405, { error: 'Method Not Allowed' });
-          return;
-        }
-        let input;
+      const store = await loadUsers();
+
+      if (pathname === '/api/admin/users' && req.method === 'GET') {
+        sendJson(res, 200, {
+          ok: true,
+          users: Object.values(store.users).map((account) => ({
+            ...userView(account),
+            createdAt: account.createdAt,
+            updatedAt: account.updatedAt,
+          })),
+        });
+        return;
+      }
+
+      if (pathname === '/api/admin/reset' && req.method === 'POST') {
+        let input = {};
         try {
-          input = JSON.parse(await readBody(req));
+          input = JSON.parse(await readBody(req, 64 * 1024));
         } catch {
-          sendJson(res, 400, { error: '请求格式错误' });
-          return;
+          /* 允许空 body：重置全部 */
         }
-        if (!sameSecret(input && input.password, ACCESS_PASSWORD)) {
-          sendJson(res, 401, { error: '访问密码不正确' });
-          return;
+        const target = String(input.username || '').trim();
+        const names = target ? [target] : Object.keys(store.users);
+        const done = [];
+        for (const name of names) {
+          if (!store.users[name]) continue;
+          store.users[name].used = 0;
+          store.users[name].updatedAt = new Date().toISOString();
+          done.push(name);
         }
-        res.writeHead(200, {
-          'Content-Type': 'application/json; charset=utf-8',
-          'Cache-Control': 'no-store',
-          'Set-Cookie': `${AUTH_COOKIE}=${AUTH_TOKEN}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000${COOKIE_SECURE}`,
-        });
-        res.end(JSON.stringify({ ok: true }));
+        await saveUsers(store);
+        sendJson(res, 200, { ok: true, reset: done });
         return;
       }
 
-      if (!isAuthed(req)) {
-        if (pathname.startsWith('/api/')) {
-          sendJson(res, 401, { error: '需要登录后访问' });
-          return;
-        }
-        const next = encodeURIComponent(pathname + (url.search || ''));
-        res.writeHead(302, { Location: `/login?next=${next}` });
-        res.end();
-        return;
-      }
-    }
-
-    if (pathname === '/api/config') {
-      if (req.method === 'GET') {
-        const cfg = await readConfig();
-        sendJson(res, 200, publicConfig(cfg));
-        return;
-      }
-      if (req.method === 'POST') {
+      if (pathname === '/api/admin/quota' && req.method === 'POST') {
         let input;
         try {
-          input = JSON.parse(await readBody(req));
+          input = JSON.parse(await readBody(req, 64 * 1024));
         } catch {
           sendJson(res, 400, { error: '请求体不是合法的 JSON' });
           return;
         }
-        const patch = {};
-
-        if (typeof input.apiKey === 'string') {
-          patch.apiKey = input.apiKey === '__CLEAR__' ? '' : input.apiKey.trim();
-        }
-        if (typeof input.baseUrl === 'string') {
-          try {
-            patch.baseUrl = normalizeBaseUrl(input.baseUrl);
-          } catch (err) {
-            sendJson(res, 400, { error: err.message });
-            return;
-          }
-        }
-        if (typeof input.systemPrompt === 'string') patch.systemPrompt = input.systemPrompt.slice(0, 8000);
-        if (typeof input.model === 'string') patch.model = input.model;
-        if (typeof input.temperature === 'number' && Number.isFinite(input.temperature)) {
-          patch.temperature = Math.min(2, Math.max(0, input.temperature));
-        }
-
-        const next = await writeConfig(patch);
-        sendJson(res, 200, { ok: true, config: publicConfig(next) });
-        return;
-      }
-      sendJson(res, 405, { error: 'Method Not Allowed' });
-      return;
-    }
-
-    if (pathname === '/api/models') {
-      const cfg = await readConfig();
-      if (!cfg.apiKey) {
-        sendJson(res, 200, { models: FALLBACK_MODELS, source: 'fallback', message: '还没有配置 Key' });
-        return;
-      }
-      try {
-        const upstream = await fetch(`${normalizeBaseUrl(cfg.baseUrl)}/models`, {
-          headers: { Authorization: `Bearer ${cfg.apiKey}` },
-          signal: AbortSignal.timeout(10000),
-        });
-        if (!upstream.ok) {
-          sendJson(res, 200, {
-            models: FALLBACK_MODELS,
-            source: 'fallback',
-            message: `上游 HTTP ${upstream.status}`,
-          });
+        const target = String(input.username || '').trim();
+        const quota = Number(input.quota);
+        if (!store.users[target]) {
+          sendJson(res, 404, { error: '账号不存在' });
           return;
         }
-        const data = await upstream.json();
-        const models = (Array.isArray(data.data) ? data.data : [])
-          .filter((m) => m && typeof m.id === 'string')
-          .map((m) => ({ id: m.id, name: m.name || m.id }));
-        sendJson(res, 200, {
-          models: models.length ? models : FALLBACK_MODELS,
-          source: models.length ? 'upstream' : 'fallback',
-        });
-      } catch (err) {
-        sendJson(res, 200, { models: FALLBACK_MODELS, source: 'fallback', message: err.message });
-      }
-      return;
-    }
-
-    if (pathname === '/api/test') {
-      const cfg = await readConfig();
-      if (!cfg.apiKey) {
-        sendJson(res, 200, { ok: false, message: '还没有保存 API Key' });
+        if (!Number.isFinite(quota) || quota <= 0) {
+          sendJson(res, 400, { error: 'quota 必须是正数' });
+          return;
+        }
+        store.users[target].quota = quota;
+        store.users[target].updatedAt = new Date().toISOString();
+        await saveUsers(store);
+        sendJson(res, 200, { ok: true, user: userView(store.users[target]) });
         return;
       }
-      const started = Date.now();
-      try {
-        const upstream = await fetch(`${normalizeBaseUrl(cfg.baseUrl)}/models`, {
-          headers: { Authorization: `Bearer ${cfg.apiKey}` },
-          signal: AbortSignal.timeout(10000),
-        });
-        const raw = await upstream.text();
-        if (upstream.ok) {
-          let count = 0;
-          try {
-            count = (JSON.parse(raw).data || []).length;
-          } catch {
-            /* 忽略解析失败 */
-          }
-          sendJson(res, 200, {
-            ok: true,
-            message: `连接正常：HTTP ${upstream.status}，${count} 个模型，${Date.now() - started}ms`,
-          });
-        } else {
-          let detail = raw.slice(0, 200);
-          try {
-            detail = JSON.parse(raw).error?.message || detail;
-          } catch {
-            /* 保留原始文本 */
-          }
-          sendJson(res, 200, { ok: false, message: `上游返回 HTTP ${upstream.status}：${detail}` });
-        }
-      } catch (err) {
-        sendJson(res, 200, { ok: false, message: `连接失败：${err.message}` });
-      }
+
+      sendJson(res, 404, { error: 'Not Found' });
       return;
     }
 
-    if (pathname === '/api/chat') {
+    if (pathname === '/api/login') {
       if (req.method !== 'POST') {
         sendJson(res, 405, { error: 'Method Not Allowed' });
         return;
       }
-      await handleChat(req, res);
+      await handleLogin(req, res);
+      return;
+    }
+
+    // 以下接口都要登录
+    if (pathname.startsWith('/api/')) {
+      const ctx = await requireUser(req, res);
+      if (!ctx) return;
+
+      if (pathname === '/api/me') {
+        sendJson(res, 200, { ok: true, user: userView(ctx.account) });
+        return;
+      }
+
+      if (pathname === '/api/config') {
+        if (req.method === 'GET') {
+          const cfg = await readConfig();
+          sendJson(res, 200, { ...publicConfig(cfg), server: true, user: userView(ctx.account) });
+          return;
+        }
+        sendJson(res, 403, { error: '本站的 Key 由服务器统一管理，无法在页面里修改' });
+        return;
+      }
+
+      if (pathname === '/api/models') {
+        await handleModels(res);
+        return;
+      }
+
+      if (pathname === '/api/test') {
+        await handleTest(res);
+        return;
+      }
+
+      if (pathname === '/api/chat') {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { error: 'Method Not Allowed' });
+          return;
+        }
+        await handleChat(req, res, ctx);
+        return;
+      }
+
+      sendJson(res, 404, { error: 'Not Found' });
       return;
     }
 
@@ -603,7 +863,9 @@ function openBrowser(target) {
   }
 }
 
-const PID_PATH = path.join(DATA_DIR, 'server.pid');
+const store = await loadUsers();
+console.log(`  账号: ${Object.keys(store.users).join('、')}`);
+console.log(`  默认额度: ${fmt(DEFAULT_QUOTA)} tokens/账号`);
 
 let port = BASE_PORT;
 for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -635,11 +897,11 @@ await writeFile(PID_PATH, String(process.pid), 'utf8');
 
 const url = `http://${HOST}:${port}`;
 console.log('');
-console.log('  DeepSeek 本地助手已启动');
+console.log('  社团版 DeepSeek 网页助手已启动');
 console.log(`  地址: ${url}`);
 console.log(`  PID : ${process.pid}`);
-console.log(`  访问密码: ${ACCESS_PASSWORD ? '已开启' : '未设置（仅建议本机使用）'}`);
-console.log('  停止: 双击 stop.bat，或按 Ctrl+C');
+console.log(`  跨域白名单: ${ALLOWED_ORIGINS.join(', ')}`);
+console.log('  停止: 按 Ctrl+C');
 console.log('');
 
 async function cleanupAndExit() {

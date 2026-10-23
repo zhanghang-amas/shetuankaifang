@@ -1,0 +1,206 @@
+/* ============================================================
+   登录门 · 账号 / 额度 面板
+   与 style.css 共用同一套 CSS 变量，自动跟随浅色/深色与主题色
+   ============================================================ */
+
+/* ---------------- 顶栏剩余额度 ---------------- */
+
+.quota-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.quota-chip.low {
+  background: rgba(214, 69, 93, 0.14);
+  color: var(--danger);
+}
+
+/* ---------------- 登录页 ---------------- */
+
+body.auth-locked {
+  overflow: hidden;
+}
+
+.auth-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: var(--bg);
+}
+
+.auth-gate[hidden] {
+  display: none;
+}
+
+.auth-card {
+  width: min(384px, 100%);
+  padding: 30px 28px 24px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+}
+
+.auth-logo {
+  width: 46px;
+  height: 46px;
+  margin-bottom: 16px;
+  border-radius: 13px;
+  background: var(--accent);
+  color: #fff;
+  display: grid;
+  place-items: center;
+}
+
+.auth-card h1 {
+  margin: 0 0 6px;
+  font-size: 19px;
+  letter-spacing: 0.2px;
+  color: var(--text);
+}
+
+.auth-sub {
+  margin: 0 0 20px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-2);
+}
+
+.auth-field {
+  display: block;
+  margin-bottom: 12px;
+}
+
+.auth-field span {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.auth-field input {
+  width: 100%;
+  padding: 11px 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 15px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+
+.auth-field input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.auth-submit {
+  width: 100%;
+  margin-top: 6px;
+  padding: 11px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s var(--ease), opacity 0.15s var(--ease);
+}
+
+.auth-submit:hover {
+  background: var(--accent-hover);
+}
+
+.auth-submit:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
+.auth-err {
+  min-height: 18px;
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: var(--danger);
+}
+
+/* ---------------- 账号面板 ---------------- */
+
+.account-grid {
+  display: grid;
+  gap: 2px;
+  margin-bottom: 14px;
+}
+
+.account-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13.5px;
+  color: var(--text-2);
+}
+
+.account-row:last-child {
+  border-bottom: 0;
+}
+
+.account-row strong {
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.account-progress {
+  height: 8px;
+  margin: 4px 0 10px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.account-progress i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.35s var(--ease);
+}
+
+.account-tip {
+  margin: 0 0 12px;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.account-note {
+  margin: 0 0 16px;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--text-3);
+}
+
+@media (max-width: 720px) {
+  .quota-chip {
+    font-size: 11px;
+    padding: 3px 8px;
+  }
+}

@@ -25,7 +25,8 @@
       }
     })();
   </script>
-  <link rel="stylesheet" href="style.css?v=13" />
+  <link rel="stylesheet" href="style.css?v=14" />
+  <link rel="stylesheet" href="auth.css?v=1" />
 </head>
 <body>
   <div class="app">
@@ -84,6 +85,7 @@
         </label>
 
         <div class="topbar-right">
+          <span class="quota-chip" id="quotaChip" hidden></span>
           <span class="conn-state" id="connState" title="服务状态">本机运行</span>
 
           <div class="theme-wrap">
@@ -205,7 +207,62 @@
 
   <div class="toast" id="toast" hidden></div>
 
-  <script src="static-adapter.js?v=1"></script>
-  <script src="app.js?v=13"></script>
+  <!-- 登录门：服务端模式下未登录时盖住整页 -->
+  <div class="auth-gate" id="authGate" hidden>
+    <form class="auth-card" id="authForm">
+      <div class="auth-logo" aria-hidden="true">
+        <svg viewBox="0 0 32 32" width="28" height="28">
+          <ellipse cx="14" cy="18.5" rx="10.5" ry="7.5" fill="currentColor" />
+          <path d="M23.5 18.5 30 12.8v11.4Z" fill="currentColor" />
+          <path d="M13 10.6c0-2.2 1.2-4 3.2-4.8M17 10.2c0-1.5.7-2.8 1.9-3.7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+          <circle cx="9.8" cy="16.7" r="1.15" fill="#fff" />
+        </svg>
+      </div>
+      <h1>社团 DeepSeek 助手</h1>
+      <p class="auth-sub">请用社团分配的账号登录。额度由社团统一提供，API Key 不会出现在你的浏览器里。</p>
+
+      <label class="auth-field">
+        <span>用户名</span>
+        <input id="authUser" type="text" autocomplete="username" spellcheck="false" placeholder="用户名" />
+      </label>
+
+      <label class="auth-field">
+        <span>密码</span>
+        <input id="authPass" type="password" autocomplete="current-password" placeholder="密码" />
+      </label>
+
+      <button class="auth-submit" id="authSubmit" type="submit">进入</button>
+      <p class="auth-err" id="authErr"></p>
+    </form>
+  </div>
+
+  <!-- 账号与额度 -->
+  <div class="modal" id="accountModal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="accountTitle">
+      <div class="modal-head">
+        <h2 id="accountTitle">账号</h2>
+        <button class="icon-btn" id="closeAccount" aria-label="关闭">✕</button>
+      </div>
+
+      <div class="account-grid">
+        <div class="account-row"><span>用户名</span><strong id="accName">—</strong></div>
+        <div class="account-row"><span>额度上限</span><strong id="accQuota">—</strong></div>
+        <div class="account-row"><span>已用</span><strong id="accUsed">—</strong></div>
+        <div class="account-row"><span>剩余</span><strong id="accRemaining">—</strong></div>
+      </div>
+
+      <div class="account-progress"><i id="accBar" style="width: 0%"></i></div>
+      <p class="account-tip" id="accTip">额度按 DeepSeek 返回的 usage 逐次扣减。</p>
+      <p class="account-note">API Key 只保存在社团服务器上；换设备或清理浏览器后重新登录即可，历史对话存在你自己的浏览器里。</p>
+
+      <div class="modal-foot">
+        <button class="text-btn danger" id="logoutBtn" type="button">退出登录</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="config.js?v=1"></script>
+  <script src="runtime.js?v=2"></script>
+  <script src="app.js?v=14"></script>
 </body>
 </html>
