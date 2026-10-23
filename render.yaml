@@ -1,0 +1,20 @@
+# Render 蓝图：Render → New + → Blueprint → 选这个仓库即可
+# 三个 sync: false 的变量会在页面上要求你填值
+services:
+  - type: web
+    name: shetuankaifang
+    runtime: node
+    plan: free
+    startCommand: node server/server.mjs
+    healthCheckPath: /api/health
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: ACCOUNTS
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true

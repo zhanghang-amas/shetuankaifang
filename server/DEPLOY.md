@@ -12,6 +12,10 @@
 
 ## 方案 A：Render 免费实例（推荐，约 5 分钟）
 
+> **一键版**：仓库根目录带了 `render.yaml`。Render → **New +** → **Blueprint** → 选仓库 → 按提示填 `DEEPSEEK_API_KEY`、`ACCOUNTS`、`ADMIN_PASSWORD` 三个值 → 部署完成。`SESSION_SECRET` 会自动生成，服务名默认 `shetuankaifang`。
+> 想手动配也行，按下面步骤走。
+
+
 1. 打开 <https://render.com> → 用 GitHub 账号登录
 2. 右上角 **New +** → **Web Service** → 选仓库 `shetuankaifang`
 3. 填写：
