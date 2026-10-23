@@ -1,0 +1,12 @@
+# 运行时数据与构建产物，不要提交
+data/
+server/data/
+node_modules/
+*.log
+*.pid
+*.zip
+
+# 系统垃圾文件
+.DS_Store
+Thumbs.db
+desktop.ini

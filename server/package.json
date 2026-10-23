@@ -1,0 +1,13 @@
+{
+  "name": "deepseek-chat-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "零依赖的 DeepSeek 网页对话助手（Node 服务版：SSE 转发 + 访问密码）",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
