@@ -34,8 +34,9 @@
 | `auth.css` | 登录门 / 账号面板样式 |
 | `runtime.js` | 运行环境适配：判断「服务端模式」还是「纯静态模式」，处理登录、token、额度刷新 |
 | `config.js` | **后端地址**写在这里（`window.DS_API_BASE`） |
-| `worker/worker.js` | **Cloudflare Worker 版后端**（免费、不用绑卡），推荐用这个 |
-| `worker/README.md` | Worker 部署步骤（全网页操作，约 10 分钟） |
+| `functions/api/[[path]].js` | **Cloudflare Pages Functions 入口**，把 `/api/*` 交给下面的逻辑 |
+| `worker/worker.js` | 后端核心逻辑（Workers / Pages 通用运行时），免费、不用绑卡 |
+| `worker/README.md` | Cloudflare Pages 部署步骤（全网页操作，约 10 分钟） |
 | `server/server.mjs` | Node 版后端（功能相同），适合 VPS / Docker / 有卡的平台 |
 | `server/DEPLOY.md` | Node 版的部署步骤（Render / VPS / Docker） |
 
@@ -92,8 +93,10 @@ Invoke-RestMethod https://你的服务.onrender.com/api/admin/quota -Method Post
 
 | 方案 | 需要信用卡 | 说明 |
 | --- | --- | --- |
-| **Cloudflare Worker**（推荐） | 不要 | 免费计划，全网页操作，见 [worker/README.md](worker/README.md) |
+| **Cloudflare Pages Functions**（推荐） | 不要 | 连 GitHub 仓库自动构建，域名 `*.pages.dev` 国内可访问，见 [worker/README.md](worker/README.md) |
 | Node 版（Render / VPS / Docker） | Render 新账号可能要 | 见 [server/DEPLOY.md](server/DEPLOY.md) |
+
+> 注：Cloudflare **Workers** 也能跑同一份代码，但 `*.workers.dev` 在国内被墙，不建议。
 
 部署完成后，把服务地址填进 `config.js`：
 
