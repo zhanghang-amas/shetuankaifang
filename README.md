@@ -34,8 +34,10 @@
 | `auth.css` | 登录门 / 账号面板样式 |
 | `runtime.js` | 运行环境适配：判断「服务端模式」还是「纯静态模式」，处理登录、token、额度刷新 |
 | `config.js` | **后端地址**写在这里（`window.DS_API_BASE`） |
-| `server/server.mjs` | 后端：登录、额度、SSE 转发、跨域、管理员接口 |
-| `server/DEPLOY.md` | 部署到 Render / VPS / Docker 的完整步骤 |
+| `worker/worker.js` | **Cloudflare Worker 版后端**（免费、不用绑卡），推荐用这个 |
+| `worker/README.md` | Worker 部署步骤（全网页操作，约 10 分钟） |
+| `server/server.mjs` | Node 版后端（功能相同），适合 VPS / Docker / 有卡的平台 |
+| `server/DEPLOY.md` | Node 版的部署步骤（Render / VPS / Docker） |
 
 ---
 
@@ -86,7 +88,12 @@ Invoke-RestMethod https://你的服务.onrender.com/api/admin/quota -Method Post
 
 ## 部署后端
 
-见 [server/DEPLOY.md](server/DEPLOY.md)（Render 免费实例，约 5 分钟）。
+两条路，功能一样，选一条：
+
+| 方案 | 需要信用卡 | 说明 |
+| --- | --- | --- |
+| **Cloudflare Worker**（推荐） | 不要 | 免费计划，全网页操作，见 [worker/README.md](worker/README.md) |
+| Node 版（Render / VPS / Docker） | Render 新账号可能要 | 见 [server/DEPLOY.md](server/DEPLOY.md) |
 
 部署完成后，把服务地址填进 `config.js`：
 
