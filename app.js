@@ -82,6 +82,10 @@
       } catch {
         toast('浏览器存储已满，历史记录可能无法保存');
       }
+      // 服务端模式下同时备份到本机（runtime.js 注入）
+      if (window.DS_HISTORY && typeof window.DS_HISTORY.push === 'function') {
+        window.DS_HISTORY.push(sessions);
+      }
     }, 250);
   }
 
@@ -1043,6 +1047,15 @@
       }
     }
     applyTheme();
+
+    // 浏览器里没有记录时，从本机服务器把历史拉回来（runtime.js 注入）
+    if (window.DS_HISTORY && typeof window.DS_HISTORY.restore === 'function') {
+      try {
+        await window.DS_HISTORY.restore();
+      } catch {
+        /* 忽略 */
+      }
+    }
 
     sessions = loadSessions();
     if (!sessions.length) createSession();

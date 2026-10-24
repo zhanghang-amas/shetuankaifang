@@ -10,3 +10,7 @@ node_modules/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# 本机启动脚本里有管理员口令，不要提交
+*.bat
+*.ps1

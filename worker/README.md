@@ -131,7 +131,7 @@ Invoke-RestMethod "$base/api/admin/quota" -Method Post `
 ## 注意事项
 
 - **密码哈希是 PBKDF2 2000 次**（受免费版 10ms CPU 限制）。密码别用 123456，最好 8 位以上混合字符。
-- KV 里只存账号哈希和已用额度，**不存 DeepSeek Key**（Key 只在环境变量里）。
+- KV 里存三样东西：账号哈希、已用额度、每个人的对话记录（key 前缀 `history:`）。**不存 DeepSeek Key**（Key 只在环境变量里）。
 - 如果哪天 `pages.dev` 也打不开了，可以给它绑一个自己的域名（Cloudflare 免费支持自定义域名）。
 
 ## 本地验证（可选）

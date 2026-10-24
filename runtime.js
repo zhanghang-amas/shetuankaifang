@@ -481,6 +481,26 @@
       });
     }
 
+    const backup = $('backupBtn');
+    if (backup) {
+      backup.addEventListener('click', async () => {
+        if (!window.DS_HISTORY) return;
+        backup.disabled = true;
+        backup.textContent = '备份中…';
+        try {
+          const count = await window.DS_HISTORY.backupNow();
+          const tip = $('accTip');
+          if (tip) tip.textContent = `已备份 ${count} 个对话到本机（server/data/history）。`;
+        } catch (err) {
+          const tip = $('accTip');
+          if (tip) tip.textContent = err.message;
+        } finally {
+          backup.disabled = false;
+          backup.textContent = '备份对话到本机';
+        }
+      });
+    }
+
     const logout = $('logoutBtn');
     if (logout) {
       logout.addEventListener('click', () => {
@@ -496,6 +516,67 @@
     if (!modal) return;
     modal.hidden = false;
     refreshQuota();
+  }
+
+  /* ---------------- 对话记录：服务端备份 ---------------- */
+
+  const HISTORY_KEY = 'ds-local-chat-v2';
+  let historyTimer = null;
+  let historyBadge = null;
+
+  function installHistory() {
+    window.DS_HISTORY = {
+      // 本地有记录就保留本地；本地空了（清缓存/换浏览器）就从服务器拉回来
+      async restore() {
+        try {
+          const res = await window.fetch('/api/sessions');
+          if (!res.ok) return;
+          const data = await res.json();
+          const remote = Array.isArray(data.sessions) ? data.sessions : [];
+          if (!remote.length) return;
+
+          let local = [];
+          try {
+            local = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+          } catch {
+            local = [];
+          }
+          if (Array.isArray(local) && local.length) return;
+
+          localStorage.setItem(HISTORY_KEY, JSON.stringify(remote));
+        } catch {
+          /* 离线时忽略，照常用本地 */
+        }
+      },
+
+      // 前端每次保存都会调用，这里防抖后整份上传
+      push(list) {
+        clearTimeout(historyTimer);
+        historyTimer = setTimeout(() => {
+          window
+            .fetch('/api/sessions', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ sessions: list }),
+            })
+            .catch(() => {});
+        }, 1200);
+      },
+
+      // 账号面板里手动点「立即备份」
+      async backupNow() {
+        const raw = localStorage.getItem(HISTORY_KEY) || '[]';
+        const list = JSON.parse(raw);
+        const res = await window.fetch('/api/sessions', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessions: list }),
+        });
+        if (!res.ok) throw new Error(`备份失败（HTTP ${res.status}）`);
+        const data = await res.json();
+        return data.count || 0;
+      },
+    };
   }
 
   /* ---------------- fetch 接管 ---------------- */
@@ -516,7 +597,7 @@
         return nativeFetch(input, init);
       }
 
-      const matched = url.pathname.match(/\/api\/(config|models|test|chat|me|logout)$/);
+      const matched = url.pathname.match(/\/api\/(config|models|test|chat|me|logout|sessions)$/);
       if (!matched) return nativeFetch(input, init);
 
       const target = apiUrl(`/api/${matched[1]}${url.search || ''}`);
@@ -572,6 +653,7 @@
     if (mode === 'server') {
       installServerFetch();
       installServerUi();
+      installHistory();
       await ensureLogin();
     } else {
       installStaticFetch();

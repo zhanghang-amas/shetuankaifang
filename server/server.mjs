@@ -35,6 +35,8 @@ const PUBLIC_FILES = new Set([
 const DATA_DIR = path.join(__dirname, 'data');
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 const USERS_PATH = path.join(DATA_DIR, 'users.json');
+// 每个账号的对话记录，直接存在本机磁盘，浏览器清了也能恢复
+const HISTORY_DIR = path.join(DATA_DIR, 'history');
 const ACCESS_LOG = path.join(DATA_DIR, 'access.log');
 const PID_PATH = path.join(DATA_DIR, 'server.pid');
 
@@ -309,6 +311,32 @@ function userView(account) {
     remaining: Math.max(0, quota - used),
     percent: quota > 0 ? Math.min(100, Math.round((used / quota) * 100)) : 100,
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* 对话记录（存本机磁盘，按账号分开）                                     */
+/* ------------------------------------------------------------------ */
+
+function historyPath(name) {
+  return path.join(HISTORY_DIR, `${encodeURIComponent(String(name))}.json`);
+}
+
+async function readHistory(name) {
+  try {
+    const raw = await readFile(historyPath(name), 'utf8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function writeHistory(name, sessions) {
+  await mkdir(HISTORY_DIR, { recursive: true });
+  const target = historyPath(name);
+  const tmp = `${target}.tmp`;
+  await writeFile(tmp, JSON.stringify(sessions), 'utf8');
+  await rename(tmp, target);
 }
 
 async function addUsage(name, tokens) {
@@ -781,6 +809,34 @@ const server = http.createServer(async (req, res) => {
 
       if (pathname === '/api/me') {
         sendJson(res, 200, { ok: true, user: userView(ctx.account) });
+        return;
+      }
+
+      // 对话记录：GET 拉取，PUT 覆盖保存（整份列表，和前端 localStorage 同构）
+      if (pathname === '/api/sessions') {
+        if (req.method === 'GET') {
+          const sessions = await readHistory(ctx.name);
+          sendJson(res, 200, { ok: true, sessions, count: sessions.length });
+          return;
+        }
+        if (req.method === 'PUT' || req.method === 'POST') {
+          let input;
+          try {
+            input = JSON.parse(await readBody(req, 32 * 1024 * 1024));
+          } catch (err) {
+            sendJson(res, 400, { error: `请求格式错误：${err.message}` });
+            return;
+          }
+          const sessions = input && Array.isArray(input.sessions) ? input.sessions : null;
+          if (!sessions) {
+            sendJson(res, 400, { error: 'sessions 必须是数组' });
+            return;
+          }
+          await writeHistory(ctx.name, sessions);
+          sendJson(res, 200, { ok: true, count: sessions.length });
+          return;
+        }
+        sendJson(res, 405, { error: 'Method Not Allowed' });
         return;
       }
 

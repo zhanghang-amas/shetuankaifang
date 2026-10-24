@@ -190,6 +190,33 @@ async function ensureUsers(env, ctx) {
   return state;
 }
 
+/* 对话记录：KV 里按账号存一份 JSON */
+const memoryHistory = {};
+
+function historyKey(name) {
+  return `history:${name}`;
+}
+
+async function readHistory(env, name) {
+  if (!env.USERS) return memoryHistory[name] || [];
+  try {
+    const raw = await env.USERS.get(historyKey(name));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function writeHistory(env, name, sessions) {
+  if (!env.USERS) {
+    memoryHistory[name] = sessions;
+    return;
+  }
+  await env.USERS.put(historyKey(name), JSON.stringify(sessions));
+}
+
 function userView(account) {
   const used = Math.max(0, Math.round(account.used || 0));
   const quota = Math.round(account.quota || 0);
@@ -538,6 +565,26 @@ export default {
         if (!account) return json({ error: '账号不存在，请重新登录', code: 'UNAUTHORIZED' }, 401, cors);
 
         if (pathname === '/api/me') return json({ ok: true, user: userView(account) }, 200, cors);
+
+        if (pathname === '/api/sessions') {
+          if (request.method === 'GET') {
+            const sessions = await readHistory(env, payload.u);
+            return json({ ok: true, sessions, count: sessions.length }, 200, cors);
+          }
+          if (request.method === 'PUT' || request.method === 'POST') {
+            let input;
+            try {
+              input = await request.json();
+            } catch (err) {
+              return json({ error: `请求格式错误：${err.message}` }, 400, cors);
+            }
+            const sessions = input && Array.isArray(input.sessions) ? input.sessions : null;
+            if (!sessions) return json({ error: 'sessions 必须是数组' }, 400, cors);
+            await writeHistory(env, payload.u, sessions);
+            return json({ ok: true, count: sessions.length }, 200, cors);
+          }
+          return json({ error: 'Method Not Allowed' }, 405, cors);
+        }
 
         if (pathname === '/api/config') {
           if (request.method !== 'GET') return json({ error: '本站的 Key 由服务器统一管理，无法在页面里修改' }, 403, cors);
