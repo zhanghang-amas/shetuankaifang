@@ -424,6 +424,37 @@ async function handleLogin(request, env, ctx, cors) {
   return json({ ok: true, token, user: userView(account) }, 200, cors);
 }
 
+/** 自己改密码 */
+async function handlePasswordChange(request, env, ctx, account, cors) {
+  let input;
+  try {
+    input = await request.json();
+  } catch {
+    return json({ error: '请求格式错误' }, 400, cors);
+  }
+
+  const oldPassword = String(input.oldPassword || '');
+  const newPassword = String(input.newPassword || '');
+  if (newPassword.length < 6) return json({ error: '新密码至少 6 位' }, 400, cors);
+  if (newPassword === oldPassword) return json({ error: '新密码不能和原密码一样' }, 400, cors);
+
+  const currentHash = await derivePassword(oldPassword, account.salt);
+  if (!timingSafeEqual(currentHash, account.hash)) {
+    return json({ error: '原密码不正确' }, 401, cors);
+  }
+
+  const state = await loadState(env);
+  const target = state.users[account.name];
+  if (!target) return json({ error: '账号不存在' }, 401, cors);
+
+  const salt = randomSalt();
+  target.salt = salt;
+  target.hash = await derivePassword(newPassword, salt);
+  target.updatedAt = new Date().toISOString();
+  await saveState(env, state, ctx);
+  return json({ ok: true, message: '密码已修改' }, 200, cors);
+}
+
 async function handleModels(env, cors) {
   const apiKey = env.DEEPSEEK_API_KEY || '';
   const fallback = [
@@ -513,6 +544,25 @@ async function handleAdmin(request, env, ctx, pathname, cors) {
     return json({ ok: true, user: userView(state.users[target]) }, 200, cors);
   }
 
+  if (pathname === '/api/admin/password' && request.method === 'POST') {
+    let input;
+    try {
+      input = await request.json();
+    } catch {
+      return json({ error: '请求体不是合法的 JSON' }, 400, cors);
+    }
+    const target = String(input.username || '').trim();
+    const password = String(input.password || '');
+    if (!state.users[target]) return json({ error: '账号不存在' }, 404, cors);
+    if (password.length < 6) return json({ error: '密码至少 6 位' }, 400, cors);
+    const salt = randomSalt();
+    state.users[target].salt = salt;
+    state.users[target].hash = await derivePassword(password, salt);
+    state.users[target].updatedAt = new Date().toISOString();
+    await saveState(env, state, ctx);
+    return json({ ok: true, message: `已重置「${target}」的密码` }, 200, cors);
+  }
+
   return json({ error: 'Not Found' }, 404, cors);
 }
 
@@ -565,6 +615,11 @@ export default {
         if (!account) return json({ error: '账号不存在，请重新登录', code: 'UNAUTHORIZED' }, 401, cors);
 
         if (pathname === '/api/me') return json({ ok: true, user: userView(account) }, 200, cors);
+
+        if (pathname === '/api/password') {
+          if (request.method !== 'POST') return json({ error: 'Method Not Allowed' }, 405, cors);
+          return await handlePasswordChange(request, env, ctx, account, cors);
+        }
 
         if (pathname === '/api/sessions') {
           if (request.method === 'GET') {

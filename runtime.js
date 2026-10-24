@@ -481,6 +481,63 @@
       });
     }
 
+    const pwdBtn = $('changePwdBtn');
+    if (pwdBtn) {
+      pwdBtn.addEventListener('click', async () => {
+        const tip = $('pwdTip');
+        const oldField = $('pwdOld');
+        const newField = $('pwdNew');
+        const confirmField = $('pwdConfirm');
+        if (!tip || !oldField || !newField || !confirmField) return;
+
+        const oldPassword = oldField.value;
+        const newPassword = newField.value;
+        const confirm = confirmField.value;
+
+        if (!oldPassword) {
+          tip.textContent = '请输入原密码';
+          return;
+        }
+        if (newPassword.length < 6) {
+          tip.textContent = '新密码至少 6 位';
+          return;
+        }
+        if (newPassword !== confirm) {
+          tip.textContent = '两次输入的新密码不一致';
+          return;
+        }
+        if (newPassword === oldPassword) {
+          tip.textContent = '新密码不能和原密码一样';
+          return;
+        }
+
+        pwdBtn.disabled = true;
+        pwdBtn.textContent = '保存中…';
+        tip.textContent = '';
+        try {
+          const res = await window.fetch('/api/password', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ oldPassword, newPassword }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            tip.textContent = data.error || `修改失败（HTTP ${res.status}）`;
+            return;
+          }
+          tip.textContent = '密码已修改，下次登录请用新密码。';
+          oldField.value = '';
+          newField.value = '';
+          confirmField.value = '';
+        } catch (err) {
+          tip.textContent = `网络错误：${err.message}`;
+        } finally {
+          pwdBtn.disabled = false;
+          pwdBtn.textContent = '保存新密码';
+        }
+      });
+    }
+
     const backup = $('backupBtn');
     if (backup) {
       backup.addEventListener('click', async () => {
@@ -597,7 +654,7 @@
         return nativeFetch(input, init);
       }
 
-      const matched = url.pathname.match(/\/api\/(config|models|test|chat|me|logout|sessions)$/);
+      const matched = url.pathname.match(/\/api\/(config|models|test|chat|me|logout|sessions|password)$/);
       if (!matched) return nativeFetch(input, init);
 
       const target = apiUrl(`/api/${matched[1]}${url.search || ''}`);
@@ -608,7 +665,8 @@
       }
 
       const request = nativeFetch(target, { ...init, headers }).then((res) => {
-        if (res.status === 401) handleUnauthorized();
+        // 改密码接口的 401 表示「原密码不对」，不是登录失效
+        if (res.status === 401 && matched[1] !== 'password') handleUnauthorized();
         if (matched[1] !== 'chat' || !res.ok || !res.body || typeof TransformStream === 'undefined') {
           return res;
         }

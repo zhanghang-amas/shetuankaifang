@@ -204,3 +204,39 @@ body.auth-locked {
     padding: 3px 8px;
   }
 }
+
+/* ---------------- 改密码 ---------------- */
+
+#accountModal .modal-card {
+  max-height: min(88vh, 780px);
+  overflow-y: auto;
+}
+
+.account-divider {
+  height: 1px;
+  margin: 18px 0 16px;
+  background: var(--border);
+}
+
+.pwd-title {
+  margin-bottom: 12px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.pwd-block .auth-field {
+  margin-bottom: 10px;
+}
+
+.pwd-block .auth-field input {
+  padding: 9px 12px;
+  font-size: 14px;
+}
+
+.pwd-tip {
+  min-height: 17px;
+  margin: 2px 0 10px;
+  font-size: 12.5px;
+  color: var(--text-2);
+}

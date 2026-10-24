@@ -421,6 +421,46 @@ function noteLoginFail(ip) {
 /* 登录 / 账号信息                                                       */
 /* ------------------------------------------------------------------ */
 
+/** 自己改密码：校验原密码，换成新的 */
+async function handlePasswordChange(ctx, req, res) {
+  let input;
+  try {
+    input = JSON.parse(await readBody(req, 64 * 1024));
+  } catch {
+    sendJson(res, 400, { error: '请求格式错误' });
+    return;
+  }
+
+  const oldPassword = String(input.oldPassword || '');
+  const newPassword = String(input.newPassword || '');
+
+  if (newPassword.length < 6) {
+    sendJson(res, 400, { error: '新密码至少 6 位' });
+    return;
+  }
+  if (newPassword === oldPassword) {
+    sendJson(res, 400, { error: '新密码不能和原密码一样' });
+    return;
+  }
+  if (!verifyPassword(ctx.account, oldPassword)) {
+    sendJson(res, 401, { error: '原密码不正确' });
+    return;
+  }
+
+  const store = await loadUsers();
+  const account = store.users[ctx.name];
+  if (!account) {
+    sendJson(res, 401, { error: '账号不存在' });
+    return;
+  }
+  const { salt, hash } = hashPassword(newPassword);
+  account.salt = salt;
+  account.hash = hash;
+  account.updatedAt = new Date().toISOString();
+  await saveUsers(store);
+  sendJson(res, 200, { ok: true, message: '密码已修改' });
+}
+
 async function handleLogin(req, res) {
   const ip = req.socket.remoteAddress || 'unknown';
   if (loginBlocked(ip)) {
@@ -789,6 +829,34 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      // 管理员重置别人的密码（成员忘记密码时用）
+      if (pathname === '/api/admin/password' && req.method === 'POST') {
+        let input;
+        try {
+          input = JSON.parse(await readBody(req, 64 * 1024));
+        } catch {
+          sendJson(res, 400, { error: '请求体不是合法的 JSON' });
+          return;
+        }
+        const target = String(input.username || '').trim();
+        const password = String(input.password || '');
+        if (!store.users[target]) {
+          sendJson(res, 404, { error: '账号不存在' });
+          return;
+        }
+        if (password.length < 6) {
+          sendJson(res, 400, { error: '密码至少 6 位' });
+          return;
+        }
+        const { salt, hash } = hashPassword(password);
+        store.users[target].salt = salt;
+        store.users[target].hash = hash;
+        store.users[target].updatedAt = new Date().toISOString();
+        await saveUsers(store);
+        sendJson(res, 200, { ok: true, message: `已重置「${target}」的密码` });
+        return;
+      }
+
       sendJson(res, 404, { error: 'Not Found' });
       return;
     }
@@ -809,6 +877,15 @@ const server = http.createServer(async (req, res) => {
 
       if (pathname === '/api/me') {
         sendJson(res, 200, { ok: true, user: userView(ctx.account) });
+        return;
+      }
+
+      if (pathname === '/api/password') {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { error: 'Method Not Allowed' });
+          return;
+        }
+        await handlePasswordChange(ctx, req, res);
         return;
       }
 

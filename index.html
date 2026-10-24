@@ -253,7 +253,27 @@
 
       <div class="account-progress"><i id="accBar" style="width: 0%"></i></div>
       <p class="account-tip" id="accTip">额度按 DeepSeek 返回的 usage 逐次扣减。</p>
-      <p class="account-note">API Key 只保存在社团服务器上；换设备或清理浏览器后重新登录即可，历史对话存在你自己的浏览器里。</p>
+      <p class="account-note">API Key 只保存在社团服务器上；换设备或清理浏览器后重新登录即可，对话记录会从本机恢复。</p>
+
+      <div class="account-divider"></div>
+
+      <div class="pwd-block">
+        <div class="pwd-title">修改密码</div>
+        <label class="auth-field">
+          <span>原密码</span>
+          <input id="pwdOld" type="password" autocomplete="current-password" placeholder="当前密码" />
+        </label>
+        <label class="auth-field">
+          <span>新密码</span>
+          <input id="pwdNew" type="password" autocomplete="new-password" placeholder="至少 6 位" />
+        </label>
+        <label class="auth-field">
+          <span>确认新密码</span>
+          <input id="pwdConfirm" type="password" autocomplete="new-password" placeholder="再输一次" />
+        </label>
+        <p class="pwd-tip" id="pwdTip"></p>
+        <button class="text-btn" id="changePwdBtn" type="button">保存新密码</button>
+      </div>
 
       <div class="modal-foot">
         <button class="text-btn" id="backupBtn" type="button">备份对话到本机</button>
@@ -264,7 +284,7 @@
   </div>
 
   <script src="config.js?v=1"></script>
-  <script src="runtime.js?v=3"></script>
+  <script src="runtime.js?v=4"></script>
   <script src="app.js?v=15"></script>
 </body>
 </html>
